@@ -1,0 +1,75 @@
+services:
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE: airflow
+      MYSQL_USER: airflow
+      MYSQL_PASSWORD: airflow
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./scripts/mysql-init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "airflow", "-pairflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  airflow-init:
+    image: apache/airflow:2.7.1
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=mysql+mysqldb://airflow:airflow@mysql:3306/airflow
+    volumes:
+      - ./dags:/opt/airflow/dags
+    command: bash -c "sleep 10 && airflow db init && airflow users create --username airflow --password airflow --firstname Airflow --lastname User --role Admin --email admin@example.com"
+    restart: on-failure
+
+  airflow-webserver:
+    image: apache/airflow:2.7.1
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=mysql+mysqldb://airflow:airflow@mysql:3306/airflow
+      - AIRFLOW__CORE__LOAD_EXAMPLES=false
+      - AIRFLOW__CORE__FERNET_KEY=UKMzEm3yIuLujjPru-jJji6pH5zzalPz_tUcdPsyC-A=
+      - AIRFLOW__WEBSERVER__BASE_URL=http://localhost:9090
+      - AIRFLOW_CONN_MYSQL_DEFAULT=mysql://airflow:airflow@mysql:3306/project_db
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./logs:/opt/airflow/logs
+      - ./plugins:/opt/airflow/plugins
+      - ./scripts:/opt/airflow/scripts
+    ports:
+      - "9090:8080"
+    command: airflow webserver
+    restart: always
+
+  airflow-scheduler:
+    image: apache/airflow:2.7.1
+    depends_on:
+      airflow-webserver:
+        condition: service_started
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=mysql+mysqldb://airflow:airflow@mysql:3306/airflow
+      - AIRFLOW__CORE__LOAD_EXAMPLES=false
+      - AIRFLOW__CORE__FERNET_KEY=UKMzEm3yIuLujjPru-jJji6pH5zzalPz_tUcdPsyC-A=
+      - AIRFLOW_CONN_MYSQL_DEFAULT=mysql://airflow:airflow@mysql:3306/project_db
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./logs:/opt/airflow/logs
+      - ./plugins:/opt/airflow/plugins
+      - ./scripts:/opt/airflow/scripts
+    command: bash -c "sleep 10 && airflow scheduler"
+    restart: always
+
+volumes:
+  mysql-data:
