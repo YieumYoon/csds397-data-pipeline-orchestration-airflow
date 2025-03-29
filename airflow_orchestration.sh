@@ -176,10 +176,10 @@ def clean_data():
         -- Clean employee_id - convert to integer
         CAST(NULLIF(employee_id, '') AS UNSIGNED) AS employee_id,
         
-        -- Clean name - handle empty values and remove titles
+        -- Clean name - handle empty values, remove titles, and trim extra spaces
         CASE 
             WHEN name = '' THEN 'Unknown' 
-            ELSE REGEXP_REPLACE(TRIM(name), '(Mr\\.|Mrs\\.|Ms\\.|Dr\\.|MD|PhD)', '')
+            ELSE TRIM(REGEXP_REPLACE(TRIM(name), '(Mr\\.|Mrs\\.|Ms\\.|Dr\\.|MD|PhD)', ''))
         END AS name,
         
         -- Clean age - convert to integer, handle non-numeric values
@@ -224,36 +224,40 @@ def clean_data():
             ELSE NULL
         END AS date_of_joining,
         
-        -- Clean years_of_experience - convert to integer and validate against age
+        -- Clean years_of_experience - improved to handle more formats
         CASE 
-            WHEN years_of_experience REGEXP '^[0-9]+$' THEN 
+            -- Try to extract numeric values from text formats
+            WHEN TRIM(REGEXP_REPLACE(years_of_experience, '[^0-9]', '')) != '' THEN 
                 CASE
                     -- If age is available, validate experience doesn't exceed age-18
-                    WHEN age REGEXP '^[0-9]+$' AND CAST(years_of_experience AS UNSIGNED) > (CAST(age AS UNSIGNED) - 18) 
+                    WHEN age REGEXP '^[0-9]+$' AND CAST(TRIM(REGEXP_REPLACE(years_of_experience, '[^0-9]', '')) AS UNSIGNED) > (CAST(age AS UNSIGNED) - 18) 
                         THEN (CAST(age AS UNSIGNED) - 18)
                     -- Experience seems unreasonably high (more than 40 years)
-                    WHEN CAST(years_of_experience AS UNSIGNED) > 40 
+                   WHEN CAST(TRIM(REGEXP_REPLACE(years_of_experience, '[^0-9]', '')) AS UNSIGNED) > 40 
                         THEN 40
                     -- Negative experience doesn't make sense
-                    WHEN CAST(years_of_experience AS UNSIGNED) < 0 
+                    WHEN CAST(TRIM(REGEXP_REPLACE(years_of_experience, '[^0-9]', '')) AS UNSIGNED) < 0 
                         THEN 0
-                    ELSE CAST(years_of_experience AS UNSIGNED)
+                    ELSE CAST(TRIM(REGEXP_REPLACE(years_of_experience, '[^0-9]', '')) AS UNSIGNED)
                 END
+            -- For completely empty values, set to NULL for proper tracking
+            WHEN years_of_experience IS NULL OR TRIM(years_of_experience) = '' 
+                THEN NULL
             ELSE NULL
         END AS years_of_experience,
         
-        -- Clean country - standardize country names (case-insensitive)
+        -- Clean country - standardize country names (case-insensitive) and replace 0 with o
         CASE 
-            WHEN LOWER(country) LIKE '%glarastan%' THEN 'Glarastan'
-            WHEN LOWER(country) LIKE '%hesperia%' THEN 'Hesperia'
-            WHEN LOWER(country) LIKE '%vorastria%' THEN 'Vorastria'
-            WHEN LOWER(country) LIKE '%velronia%' THEN 'Velronia'
-            WHEN LOWER(country) LIKE '%mordalia%' THEN 'Mordalia'
-            WHEN LOWER(country) LIKE '%drivania%' THEN 'Drivania'
-            WHEN LOWER(country) LIKE '%tavlora%' THEN 'Tavlora'
-            WHEN LOWER(country) LIKE '%zorathia%' THEN 'Zorathia'
-            WHEN LOWER(country) LIKE '%xanthoria%' THEN 'Xanthoria'
-            WHEN LOWER(country) LIKE '%luronia%' THEN 'Luronia'
+            WHEN LOWER(REPLACE(country, '0', 'o')) LIKE '%glarastan%' THEN 'Glarastan'
+            WHEN LOWER(REPLACE(country, '0', 'o')) LIKE '%hesperia%' THEN 'Hesperia'
+            WHEN LOWER(REPLACE(country, '0', 'o')) LIKE '%vorastria%' THEN 'Vorastria'
+            WHEN LOWER(REPLACE(country, '0', 'o')) LIKE '%velronia%' THEN 'Velronia'
+            WHEN LOWER(REPLACE(country, '0', 'o')) LIKE '%mordalia%' THEN 'Mordalia'
+            WHEN LOWER(REPLACE(country, '0', 'o')) LIKE '%drivania%' THEN 'Drivania'
+            WHEN LOWER(REPLACE(country, '0', 'o')) LIKE '%tavlora%' THEN 'Tavlora'
+            WHEN LOWER(REPLACE(country, '0', 'o')) LIKE '%zorathia%' THEN 'Zorathia'
+            WHEN LOWER(REPLACE(country, '0', 'o')) LIKE '%xanthoria%' THEN 'Xanthoria'
+            WHEN LOWER(REPLACE(country, '0', 'o')) LIKE '%luronia%' THEN 'Luronia'
             WHEN country = '' THEN 'Unknown'
             ELSE country
         END AS country,
@@ -262,24 +266,26 @@ def clean_data():
         -- Also handle outliers (extremely high or low values)
         CASE 
             WHEN salary REGEXP '^[0-9]+(\.[0-9]+)?$' THEN 
-                CASE
-                    -- Flag extremely high salaries (> 1,000,000)
-                    WHEN CAST(salary AS DECIMAL(10,2)) > 1000000 THEN NULL
-                    -- Flag extremely low salaries (< 10,000) for full-time employees
-                    WHEN CAST(salary AS DECIMAL(10,2)) < 10000 THEN NULL
-                    ELSE CAST(salary AS DECIMAL(10,2))
-                END
+            CASE
+                -- Flag extremely high salaries (> 1,000,000)
+                WHEN CAST(salary AS DECIMAL(10,2)) > 1000000 THEN NULL
+                -- Flag extremely low salaries (< 10,000) for full-time employees
+                WHEN CAST(salary AS DECIMAL(10,2)) < 10000 THEN NULL
+                -- Mark salary as NULL if it is 0
+                WHEN CAST(salary AS DECIMAL(10,2)) = 0 THEN NULL
+                ELSE CAST(salary AS DECIMAL(10,2))
+            END
             ELSE NULL
         END AS salary,
         
         -- Clean performance_rating - standardize ratings and handle missing values
         CASE 
             WHEN LOWER(performance_rating) LIKE '%top%' THEN 'Top Performers'
-            WHEN LOWER(performance_rating) LIKE '%high%' THEN 'High Performers'
+            WHEN LOWER(performance_rating) LIKE '%high%' THEN 'Top Performers'
             WHEN LOWER(performance_rating) LIKE '%average%' THEN 'Average Performers'
             WHEN LOWER(performance_rating) LIKE '%low%' THEN 'Low Performers'
             WHEN LOWER(performance_rating) LIKE '%poor%' THEN 'Low Performers'
-            WHEN performance_rating = '' THEN 'Not Evaluated'
+            WHEN performance_rating = '' THEN NULL
             ELSE performance_rating
         END AS performance_rating,
         
@@ -429,6 +435,8 @@ def create_salary_by_department():
         MAX(salary) AS MaximumSalary
     FROM 
         employees
+    WHERE 
+        Department IS NOT NULL AND salary IS NOT NULL
     GROUP BY 
         Department
     ORDER BY 
@@ -446,6 +454,8 @@ def create_salary_by_experience():
         AVG(salary) AS AverageSalary
     FROM 
         employees
+    WHERE 
+        years_of_experience IS NOT NULL AND salary IS NOT NULL
     GROUP BY 
         years_of_experience
     ORDER BY 
@@ -464,6 +474,8 @@ def create_performance_analysis():
         COUNT(*) AS EmployeeCount
     FROM 
         employees
+    WHERE 
+        performance_rating IS NOT NULL AND salary IS NOT NULL
     GROUP BY 
         performance_rating
     ORDER BY 
@@ -485,10 +497,11 @@ def create_performance_by_start_year():
             WHEN performance_rating = 'Low Performers' THEN 2
             WHEN performance_rating = 'Poor Performers' THEN 1
             ELSE NULL
-        END) AS AveragePerformanceScore,
-        COUNT(*) AS EmployeeCount
+        END) AS AveragePerformanceScore
     FROM 
         employees
+    WHERE 
+        date_of_joining IS NOT NULL AND performance_rating IS NOT NULL
     GROUP BY 
         YEAR(date_of_joining)
     ORDER BY 
@@ -510,12 +523,11 @@ def create_salary_by_start_year():
     FROM 
         employees
     WHERE
-        date_of_joining IS NOT NULL
-        AND salary IS NOT NULL
+        date_of_joining IS NOT NULL AND salary IS NOT NULL
     GROUP BY 
         YEAR(date_of_joining)
     ORDER BY 
-        start_year DESC;
+        start_year;
     """
     execute_sql(sql)
 
@@ -530,7 +542,7 @@ def create_employee_hire_by_start_year():
     FROM 
         employees
     WHERE
-        date_of_joining IS NOT NULL
+        date_of_joining IS NOT NULL AND employee_id IS NOT NULL
     GROUP BY 
         YEAR(date_of_joining)
     ORDER BY 
@@ -559,6 +571,8 @@ def create_analysis_by_start_year():
         END) AS AveragePerformanceScore
     FROM 
         employees
+    WHERE 
+        date_of_joining IS NOT NULL AND salary IS NOT NULL AND performance_rating IS NOT NULL
     GROUP BY 
         YEAR(date_of_joining)
     ORDER BY 
@@ -650,7 +664,7 @@ analysis_by_start_year_task = PythonOperator(
 )
 
 # Update dependencies
-cleaning_task >> [salary_by_department_task, salary_by_experience_task, 
+ingestion_task >> cleaning_task >> [salary_by_department_task, salary_by_experience_task, 
                 performance_analysis_task, performance_by_start_year_task, 
                 salary_by_start_year_task, employee_hire_by_start_year_task,
                 analysis_by_start_year_task]
