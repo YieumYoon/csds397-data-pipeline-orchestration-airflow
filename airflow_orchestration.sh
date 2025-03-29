@@ -44,7 +44,24 @@ CREATE TABLE IF NOT EXISTS employees (
 );"
 
 # Copy the employee data to a secure location that MySQL can read
-sudo cp employee_data_source.csv /var/lib/mysql-files/
+# Create the directory if it doesn't exist
+sudo mkdir -p /var/lib/mysql-files/
+
+# Set proper permissions
+sudo chmod 750 /var/lib/mysql-files/
+sudo chown mysql:mysql /var/lib/mysql-files/
+
+# Copy the CSV file to both MySQL directory and Airflow home directory
+sudo cp -v employee_data_source.csv /var/lib/mysql-files/
+sudo chmod 644 /var/lib/mysql-files/employee_data_source.csv
+sudo chown mysql:mysql /var/lib/mysql-files/employee_data_source.csv
+
+# Also copy to Airflow home directory where the Airflow user has access
+cp -v employee_data_source.csv $HOME/airflow/employee_data_source.csv
+chmod 644 $HOME/airflow/employee_data_source.csv
+
+# Verify the file was copied
+sudo ls -la /var/lib/mysql-files/
 
 # Setting up Airflow and initializing it
 pip install apache-airflow apache-airflow-providers-mysql pandas
@@ -109,7 +126,8 @@ def execute_sql(sql_query):
 def ingest_data_to_mysql():
     try:
         # Read the CSV file
-        df = pd.read_csv('/var/lib/mysql-files/employee_data_source.csv')
+        # df = pd.read_csv('/var/lib/mysql-files/employee_data_source.csv')
+        df = pd.read_csv('$HOME/airflow/employee_data_source.csv')
         
         # Connect to MySQL directly
         conn = mysql.connector.connect(
@@ -151,7 +169,131 @@ def clean_data():
     -- Clear the cleaned employees table
     TRUNCATE TABLE employees;
     
-    -- Insert cleaned data
+    -- Create a temporary table to handle duplicates
+    DROP TABLE IF EXISTS temp_employees;
+    CREATE TABLE temp_employees AS
+    SELECT 
+        -- Clean employee_id - convert to integer
+        CAST(NULLIF(employee_id, '') AS UNSIGNED) AS employee_id,
+        
+        -- Clean name - handle empty values and remove titles
+        CASE 
+            WHEN name = '' THEN 'Unknown' 
+            ELSE REGEXP_REPLACE(TRIM(name), '(Mr\\.|Mrs\\.|Ms\\.|Dr\\.|MD|PhD)', '')
+        END AS name,
+        
+        -- Clean age - convert to integer, handle non-numeric values
+        CASE 
+            WHEN age REGEXP '^[0-9]+$' THEN 
+                CASE
+                    WHEN CAST(age AS UNSIGNED) < 18 THEN NULL -- Flag unrealistic ages
+                    WHEN CAST(age AS UNSIGNED) > 80 THEN NULL -- Flag unrealistic ages
+                    ELSE CAST(age AS UNSIGNED)
+                END
+            ELSE NULL
+        END AS age,
+        
+        -- Clean department - standardize department names
+        CASE 
+            WHEN LOWER(department) IN ('hr', 'h r', 'human resources', 'human resource') THEN 'HR'
+            WHEN LOWER(department) IN ('it', 'information technology') THEN 'IT'
+            WHEN LOWER(department) IN ('r&d', 'research', 'rnd', 'research and development') THEN 'R&D'
+            WHEN LOWER(department) IN ('operations', 'oprations') THEN 'Operations'
+            WHEN LOWER(department) IN ('cust support', 'customersupport', 'support', 'customer support') THEN 'Customer Support'
+            WHEN LOWER(department) IN ('finanace', 'fin', 'finance') THEN 'Finance'
+            WHEN LOWER(department) IN ('lgistics', 'logistics', 'logstics') THEN 'Logistics'
+            WHEN LOWER(department) IN ('marketng', 'marketing') THEN 'Marketing'
+            WHEN LOWER(department) IN ('sales', 'slaes') THEN 'Sales'
+            WHEN LOWER(department) IN ('legal', 'legl') THEN 'Legal'
+            ELSE department
+        END AS department,
+        
+        -- Clean date_of_joining - convert various date formats to standard format
+        -- Also handle future dates (using current date as the cutoff)
+        CASE
+            WHEN date_of_joining REGEXP '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' THEN 
+                CASE 
+                    WHEN STR_TO_DATE(date_of_joining, '%Y-%m-%d') > CURDATE() THEN NULL
+                    ELSE STR_TO_DATE(date_of_joining, '%Y-%m-%d')
+                END
+            WHEN date_of_joining REGEXP '^[0-9]{4}/[0-9]{2}/[0-9]{2}$' THEN 
+                CASE 
+                    WHEN STR_TO_DATE(date_of_joining, '%Y/%m/%d') > CURDATE() THEN NULL
+                    ELSE STR_TO_DATE(date_of_joining, '%Y/%m/%d')
+                END
+            ELSE NULL
+        END AS date_of_joining,
+        
+        -- Clean years_of_experience - convert to integer and validate against age
+        CASE 
+            WHEN years_of_experience REGEXP '^[0-9]+$' THEN 
+                CASE
+                    -- If age is available, validate experience doesn't exceed age-18
+                    WHEN age REGEXP '^[0-9]+$' AND CAST(years_of_experience AS UNSIGNED) > (CAST(age AS UNSIGNED) - 18) 
+                        THEN (CAST(age AS UNSIGNED) - 18)
+                    -- Experience seems unreasonably high (more than 40 years)
+                    WHEN CAST(years_of_experience AS UNSIGNED) > 40 
+                        THEN 40
+                    -- Negative experience doesn't make sense
+                    WHEN CAST(years_of_experience AS UNSIGNED) < 0 
+                        THEN 0
+                    ELSE CAST(years_of_experience AS UNSIGNED)
+                END
+            ELSE NULL
+        END AS years_of_experience,
+        
+        -- Clean country - standardize country names (case-insensitive)
+        CASE 
+            WHEN LOWER(country) LIKE '%glarastan%' THEN 'Glarastan'
+            WHEN LOWER(country) LIKE '%hesperia%' THEN 'Hesperia'
+            WHEN LOWER(country) LIKE '%vorastria%' THEN 'Vorastria'
+            WHEN LOWER(country) LIKE '%velronia%' THEN 'Velronia'
+            WHEN LOWER(country) LIKE '%mordalia%' THEN 'Mordalia'
+            WHEN LOWER(country) LIKE '%drivania%' THEN 'Drivania'
+            WHEN LOWER(country) LIKE '%tavlora%' THEN 'Tavlora'
+            WHEN LOWER(country) LIKE '%zorathia%' THEN 'Zorathia'
+            WHEN LOWER(country) LIKE '%xanthoria%' THEN 'Xanthoria'
+            WHEN LOWER(country) LIKE '%luronia%' THEN 'Luronia'
+            WHEN country = '' THEN 'Unknown'
+            ELSE country
+        END AS country,
+        
+        -- Clean salary - convert to decimal, handle non-numeric values
+        -- Also handle outliers (extremely high or low values)
+        CASE 
+            WHEN salary REGEXP '^[0-9]+(\.[0-9]+)?$' THEN 
+                CASE
+                    -- Flag extremely high salaries (> 1,000,000)
+                    WHEN CAST(salary AS DECIMAL(10,2)) > 1000000 THEN NULL
+                    -- Flag extremely low salaries (< 10,000) for full-time employees
+                    WHEN CAST(salary AS DECIMAL(10,2)) < 10000 THEN NULL
+                    ELSE CAST(salary AS DECIMAL(10,2))
+                END
+            ELSE NULL
+        END AS salary,
+        
+        -- Clean performance_rating - standardize ratings and handle missing values
+        CASE 
+            WHEN LOWER(performance_rating) LIKE '%top%' THEN 'Top Performers'
+            WHEN LOWER(performance_rating) LIKE '%high%' THEN 'High Performers'
+            WHEN LOWER(performance_rating) LIKE '%average%' THEN 'Average Performers'
+            WHEN LOWER(performance_rating) LIKE '%low%' THEN 'Low Performers'
+            WHEN LOWER(performance_rating) LIKE '%poor%' THEN 'Low Performers'
+            WHEN performance_rating = '' THEN 'Not Evaluated'
+            ELSE performance_rating
+        END AS performance_rating,
+        
+        -- Add row number to handle duplicates
+        ROW_NUMBER() OVER (PARTITION BY CAST(NULLIF(employee_id, '') AS UNSIGNED) ORDER BY 
+                           CASE 
+                               WHEN date_of_joining REGEXP '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' THEN STR_TO_DATE(date_of_joining, '%Y-%m-%d')
+                               WHEN date_of_joining REGEXP '^[0-9]{4}/[0-9]{2}/[0-9]{2}$' THEN STR_TO_DATE(date_of_joining, '%Y/%m/%d')
+                               ELSE NULL
+                           END DESC) AS row_num
+    FROM employees_raw
+    WHERE employee_id IS NOT NULL AND employee_id != '';
+    
+    -- Insert only the first occurrence of each employee_id into the final table
     INSERT INTO employees (
         employee_id, 
         name, 
@@ -164,78 +306,114 @@ def clean_data():
         performance_rating
     )
     SELECT 
-        -- Clean employee_id - convert to integer
-        CAST(NULLIF(employee_id, '') AS UNSIGNED) AS employee_id,
+        employee_id, 
+        name, 
+        age, 
+        department, 
+        date_of_joining, 
+        years_of_experience, 
+        country, 
+        salary, 
+        performance_rating
+    FROM 
+        temp_employees
+    WHERE 
+        row_num = 1;
         
-        -- Clean name - handle empty values
-        CASE WHEN name = '' THEN 'Unknown' ELSE name END AS name,
+    -- Track duplicates in quality issues table
+    CREATE TABLE IF NOT EXISTS data_quality_issues (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        employee_id INT,
+        issue_type VARCHAR(50),
+        description VARCHAR(255),
+        fixed BOOLEAN DEFAULT FALSE
+    );
+    
+    -- Truncate previous quality issues
+    TRUNCATE TABLE data_quality_issues;
+    
+    -- Add duplicate records to data quality issues
+    INSERT INTO data_quality_issues (employee_id, issue_type, description)
+    SELECT 
+        employee_id,
+        'Duplicate Record',
+        CONCAT('Found ', COUNT(*) - 1, ' duplicate records for this employee ID')
+    FROM 
+        temp_employees
+    GROUP BY 
+        employee_id
+    HAVING 
+        COUNT(*) > 1;
+    
+    -- Track records with missing values
+    INSERT INTO data_quality_issues (employee_id, issue_type, description)
+    SELECT 
+        employee_id, 
+        'Missing Data', 
+        CONCAT('Missing values in: ', 
+            CASE WHEN name = 'Unknown' THEN 'Name, ' ELSE '' END,
+            CASE WHEN age IS NULL THEN 'Age, ' ELSE '' END,
+            CASE WHEN date_of_joining IS NULL THEN 'Date of Joining, ' ELSE '' END,
+            CASE WHEN years_of_experience IS NULL THEN 'Years of Experience, ' ELSE '' END,
+            CASE WHEN country = 'Unknown' THEN 'Country, ' ELSE '' END,
+            CASE WHEN salary IS NULL THEN 'Salary, ' ELSE '' END,
+            CASE WHEN performance_rating = 'Not Evaluated' THEN 'Performance Rating' ELSE '' END
+        )
+    FROM 
+        employees
+    WHERE 
+        name = 'Unknown' OR 
+        age IS NULL OR 
+        date_of_joining IS NULL OR 
+        years_of_experience IS NULL OR 
+        country = 'Unknown' OR
+        salary IS NULL OR
+        performance_rating = 'Not Evaluated';
+    
+    -- Track records with suspicious salary values
+    INSERT INTO data_quality_issues (employee_id, issue_type, description)
+    SELECT 
+        e.employee_id,
+        'Suspicious Salary',
+        CONCAT('Salary (', er.salary, ') outside normal range for department/experience')
+    FROM 
+        employees_raw er
+    JOIN 
+        employees e ON CAST(NULLIF(er.employee_id, '') AS UNSIGNED) = e.employee_id
+    WHERE 
+        er.salary REGEXP '^[0-9]+(\.[0-9]+)?$' AND
+        (CAST(er.salary AS DECIMAL(10,2)) > 500000 OR
+        CAST(er.salary AS DECIMAL(10,2)) < 30000);
+    
+    -- Track records with suspicious experience values
+    INSERT INTO data_quality_issues (employee_id, issue_type, description)
+    SELECT 
+        e.employee_id,
+        'Suspicious Experience',
+        'Years of experience unrealistic compared to age'
+    FROM 
+        employees_raw er
+    JOIN 
+        employees e ON CAST(NULLIF(er.employee_id, '') AS UNSIGNED) = e.employee_id
+    WHERE 
+        er.years_of_experience REGEXP '^[0-9]+$' AND
+        er.age REGEXP '^[0-9]+$' AND
+        CAST(er.years_of_experience AS UNSIGNED) > (CAST(er.age AS UNSIGNED) - 18);
+    
+    -- Track records with future joining dates
+    INSERT INTO data_quality_issues (employee_id, issue_type, description)
+    SELECT 
+        CAST(NULLIF(employee_id, '') AS UNSIGNED) as employee_id,
+        'Future Date',
+        'Date of joining is in the future'
+    FROM 
+        employees_raw
+    WHERE 
+        (date_of_joining REGEXP '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' AND STR_TO_DATE(date_of_joining, '%Y-%m-%d') > CURDATE()) OR
+        (date_of_joining REGEXP '^[0-9]{4}/[0-9]{2}/[0-9]{2}$' AND STR_TO_DATE(date_of_joining, '%Y/%m/%d') > CURDATE());
         
-        -- Clean age - convert to integer, handle non-numeric values
-        CASE 
-            WHEN age REGEXP '^[0-9]+$' THEN CAST(age AS UNSIGNED)
-            ELSE NULL
-        END AS age,
-        
-        -- Clean department - standardize department names
-        CASE 
-            WHEN LOWER(department) IN ('hr', 'h r', 'human resources', 'human resource') THEN 'HR'
-            WHEN LOWER(department) IN ('it', 'information technology') THEN 'IT'
-            WHEN LOWER(department) IN ('r&d', 'research', 'rnd', 'research and development') THEN 'R&D'
-            WHEN LOWER(department) IN ('operations', 'oprations') THEN 'Operations'
-            WHEN LOWER(department) IN ('cust support', 'customersupport', 'support', 'customer support') THEN 'Customer Support'
-            WHEN LOWER(department) IN ('finanace', 'fin', 'finance') THEN 'Finance'
-            WHEN LOWER(department) IN ('lgistics', 'logistics') THEN 'Logistics'
-            WHEN LOWER(department) IN ('marketng', 'marketing') THEN 'Marketing'
-            WHEN LOWER(department) IN ('sales', 'slaes') THEN 'Sales'
-            WHEN LOWER(department) IN ('legal', 'legl') THEN 'Legal'
-            ELSE department
-        END AS department,
-        
-        -- Clean date_of_joining - convert various date formats to standard format
-        CASE
-            WHEN date_of_joining REGEXP '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' THEN STR_TO_DATE(date_of_joining, '%Y-%m-%d')
-            WHEN date_of_joining REGEXP '^[0-9]{4}/[0-9]{2}/[0-9]{2}$' THEN STR_TO_DATE(date_of_joining, '%Y/%m/%d')
-            ELSE NULL
-        END AS date_of_joining,
-        
-        -- Clean years_of_experience - convert to integer, handle non-numeric values
-        CASE 
-            WHEN years_of_experience REGEXP '^[0-9]+$' THEN CAST(years_of_experience AS UNSIGNED)
-            ELSE NULL
-        END AS years_of_experience,
-        
-        -- Clean country - standardize country names
-        CASE 
-            WHEN LOWER(country) LIKE '%glarastan%' THEN 'Glarastan'
-            WHEN LOWER(country) LIKE '%hesperia%' THEN 'Hesperia'
-            WHEN LOWER(country) LIKE '%vorastria%' THEN 'Vorastria'
-            WHEN LOWER(country) LIKE '%velronia%' THEN 'Velronia'
-            WHEN LOWER(country) LIKE '%mordalia%' THEN 'Mordalia'
-            WHEN LOWER(country) LIKE '%drivania%' THEN 'Drivania'
-            WHEN LOWER(country) LIKE '%tavlora%' THEN 'Tavlora'
-            WHEN LOWER(country) LIKE '%zorathia%' THEN 'Zorathia'
-            WHEN LOWER(country) LIKE '%xanthoria%' THEN 'Xanthoria'
-            WHEN LOWER(country) LIKE '%luronia%' THEN 'Luronia'
-            ELSE country
-        END AS country,
-        
-        -- Clean salary - convert to decimal, handle non-numeric values
-        CASE 
-            WHEN salary REGEXP '^[0-9]+(\.[0-9]+)?$' THEN CAST(salary AS DECIMAL(10,2))
-            ELSE NULL
-        END AS salary,
-        
-        -- Clean performance_rating - standardize ratings
-        CASE 
-            WHEN LOWER(performance_rating) LIKE '%top%' THEN 'Top Performers'
-            WHEN LOWER(performance_rating) LIKE '%high%' THEN 'High Performers'
-            WHEN LOWER(performance_rating) LIKE '%average%' THEN 'Average Performers'
-            WHEN LOWER(performance_rating) LIKE '%low%' THEN 'Low Performers'
-            WHEN LOWER(performance_rating) LIKE '%poor%' THEN 'Poor Performers'
-            ELSE performance_rating
-        END AS performance_rating
-    FROM employees_raw
-    WHERE employee_id IS NOT NULL AND employee_id != '';
+    -- Clean up temporary table
+    DROP TABLE IF EXISTS temp_employees;
     """
     execute_sql(cleaning_sql)
 
@@ -315,6 +493,48 @@ def create_performance_by_start_year():
         YEAR(date_of_joining)
     ORDER BY 
         StartYear;
+    """
+    execute_sql(sql)
+
+# Function to create salary by start year analysis
+def create_salary_by_start_year():
+    sql = """
+    DROP TABLE IF EXISTS salary_by_start_year;
+    CREATE TABLE salary_by_start_year AS
+    SELECT 
+        YEAR(date_of_joining) AS start_year,
+        AVG(salary) AS avg_salary,
+        MIN(salary) AS min_salary,
+        MAX(salary) AS max_salary,
+        COUNT(*) AS employee_count
+    FROM 
+        employees
+    WHERE
+        date_of_joining IS NOT NULL
+        AND salary IS NOT NULL
+    GROUP BY 
+        YEAR(date_of_joining)
+    ORDER BY 
+        start_year DESC;
+    """
+    execute_sql(sql)
+
+# Function to create employee hire by start year analysis
+def create_employee_hire_by_start_year():
+    sql = """
+    DROP TABLE IF EXISTS employee_hire_by_start_year;
+    CREATE TABLE employee_hire_by_start_year AS
+    SELECT 
+        YEAR(date_of_joining) AS start_year,
+        COUNT(employee_id) AS hire_count
+    FROM 
+        employees
+    WHERE
+        date_of_joining IS NOT NULL
+    GROUP BY 
+        YEAR(date_of_joining)
+    ORDER BY 
+        start_year;
     """
     execute_sql(sql)
 
@@ -408,17 +628,32 @@ performance_by_start_year_task = PythonOperator(
     dag=dag,
 )
 
-# Task 7: Create Comprehensive Analysis by Start Year
+# Task 7: Create Salary by Start Year Analysis
+salary_by_start_year_task = PythonOperator(
+    task_id='salary_by_start_year',
+    python_callable=create_salary_by_start_year,
+    dag=dag,
+)
+
+# Task 8: Create Employee Hire by Start Year Analysis
+employee_hire_by_start_year_task = PythonOperator(
+    task_id='employee_hire_by_start_year',
+    python_callable=create_employee_hire_by_start_year,
+    dag=dag,
+)
+
+# Task 9: Create Comprehensive Analysis by Start Year
 analysis_by_start_year_task = PythonOperator(
     task_id='analysis_by_start_year',
     python_callable=create_analysis_by_start_year,
     dag=dag,
 )
 
-# Define dependencies
-ingestion_task >> cleaning_task
-cleaning_task >> [salary_by_department_task, salary_by_experience_task, performance_analysis_task, 
-                performance_by_start_year_task, analysis_by_start_year_task]
+# Update dependencies
+cleaning_task >> [salary_by_department_task, salary_by_experience_task, 
+                performance_analysis_task, performance_by_start_year_task, 
+                salary_by_start_year_task, employee_hire_by_start_year_task,
+                analysis_by_start_year_task]
 EOF
 
 # Install required packages for the Python functions
