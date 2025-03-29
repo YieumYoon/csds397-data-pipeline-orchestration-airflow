@@ -346,25 +346,6 @@ def create_analysis_by_start_year():
     """
     execute_sql(sql)
 
-# Function to create country demographics
-def create_country_demographics():
-    sql = """
-    DROP TABLE IF EXISTS country_demographics;
-    CREATE TABLE country_demographics AS
-    SELECT 
-        country,
-        COUNT(*) AS EmployeeCount,
-        AVG(salary) AS AverageSalary,
-        AVG(age) AS AverageAge,
-        AVG(years_of_experience) AS AverageExperience
-    FROM 
-        employees
-    GROUP BY 
-        country
-    ORDER BY 
-        EmployeeCount DESC;
-    """
-    execute_sql(sql)
 
 default_args = {
     'owner': 'airflow',
@@ -434,17 +415,10 @@ analysis_by_start_year_task = PythonOperator(
     dag=dag,
 )
 
-# Task 8: Country Demographics Analysis
-country_demographics_task = PythonOperator(
-    task_id='country_demographics',
-    python_callable=create_country_demographics,
-    dag=dag,
-)
-
 # Define dependencies
 ingestion_task >> cleaning_task
 cleaning_task >> [salary_by_department_task, salary_by_experience_task, performance_analysis_task, 
-                performance_by_start_year_task, analysis_by_start_year_task, country_demographics_task]
+                performance_by_start_year_task, analysis_by_start_year_task]
 EOF
 
 # Install required packages for the Python functions
